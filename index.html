@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Gesture Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; color: white; font-family: 'Segoe UI', sans-serif; }
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; }
+        #webcam { position: absolute; bottom: 20px; right: 20px; width: 180px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2); transform: scaleX(-1); }
+        .hint { font-size: 0.9em; opacity: 0.7; }
+        b { color: #00d4ff; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h1>Particle Alchemy</h1>
+    <p><b>Fist → Open:</b> Fireworks Explosion</p>
+    <p><b>Tilt Hand:</b> Vortex Swirl</p>
+    <p><b>1-5 Fingers:</b> Change Templates</p>
+    <p class="hint" id="gesture-out">Waiting for hand...</p>
+</div>
+<video id="webcam" autoplay playsinline></video>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/23.1.1/tween.umd.js"></script>
+
+<script>
+    const PARTICLE_COUNT = 10000;
+    let isExploding = false;
+    let lastHandPos = { x: 0, y: 0 };
+    let handOpen = true;
+
+    // --- THREE.JS SCENE ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 8;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const geo = new THREE.BufferGeometry();
+    const posArray = new Float32Array(PARTICLE_COUNT * 3);
+    const velArray = new Float32Array(PARTICLE_COUNT * 3); // Store velocity for physics
+    const colorArray = new Float32Array(PARTICLE_COUNT * 3);
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+        posArray[i*3] = (Math.random()-0.5)*10;
+        posArray[i*3+1] = (Math.random()-0.5)*10;
+        posArray[i*3+2] = (Math.random()-0.5)*10;
+        velArray[i*3] = 0; velArray[i*3+1] = 0; velArray[i*3+2] = 0;
+    }
+
+    geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+
+    const mat = new THREE.PointsMaterial({
+        size: 0.04,
+        vertexColors: true,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0.6
+    });
+
+    const points = new THREE.Points(geo, mat);
+    scene.add(points);
+
+    // --- BEHAVIOR TRIGGERS ---
+    function triggerExplosion() {
+        if (isExploding) return;
+        isExploding = true;
+        const positions = geo.attributes.position.array;
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            velArray[i*3] = (Math.random() - 0.5) * 0.5;
+            velArray[i*3+1] = (Math.random() - 0.5) * 0.5;
+            velArray[i*3+2] = (Math.random() - 0.5) * 0.5;
+        }
+        setTimeout(() => { isExploding = false; }, 1000);
+    }
+
+    const shapes = {
+        flower: (i, u, v) => ({ x: 3 * Math.sin(5*u) * Math.cos(u), y: 3 * Math.sin(5*u) * Math.sin(u), z: Math.sin(v) }),
+        heart: (i, u, v) => ({ 
+            x: 0.2 * (16 * Math.pow(Math.sin(u), 3)), 
+            y: 0.2 * (13 * Math.cos(u) - 5 * Math.cos(2*u) - 2 * Math.cos(3*u) - Math.cos(4*u)), 
+            z: Math.cos(v) 
+        }),
+        saturn: (i, u, v) => i > 5000 ? 
+            ({ x: Math.cos(u)*5, y: Math.random()*0.2, z: Math.sin(u)*5 }) : 
+            ({ x: Math.cos(u)*Math.sin(v)*2.5, y: Math.sin(u)*Math.sin(v)*2.5, z: Math.cos(v)*2.5 })
+    };
+
+    function morphTo(shapeKey, color) {
+        const target = shapes[shapeKey];
+        const pos = geo.attributes.position.array;
+        const cols = geo.attributes.color.array;
+        const c = new THREE.Color(color);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const u = Math.random() * Math.PI * 2;
+            const v = Math.random() * Math.PI;
+            const t = target(i, u, v);
+
+            new TWEEN.Tween(pos).to({ [i*3]: t.x, [i*3+1]: t.y, [i*3+2]: t.z }, 1000)
+                .easing(TWEEN.Easing.Quadratic.Out).start();
+            
+            cols[i*3] = c.r; cols[i*3+1] = c.g; cols[i*3+2] = c.b;
+        }
+        geo.attributes.color.needsUpdate = true;
+    }
+
+    // --- AI HAND TRACKING ---
+    const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6 });
+    
+    hands.onResults((res) => {
+        if (!res.multiHandLandmarks.length) return;
+        const lm = res.multiHandLandmarks[0];
+
+        // 1. Detect Explosion (Fist to Open)
+        const tipDist = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
+        const currentlyOpen = tipDist > 0.4;
+        if (!handOpen && currentlyOpen) triggerExplosion();
+        handOpen = currentlyOpen;
+
+        // 2. Swirl Behavior (Hand Rotation)
+        const rotation = lm[5].x - lm[17].x; // Difference between index base and pinky base
+        points.rotation.z += rotation * 0.1;
+
+        // 3. Movement Following
+        const targetX = (lm[9].x - 0.5) * -15;
+        const targetY = (lm[9].y - 0.5) * -10;
+        points.position.lerp(new THREE.Vector3(targetX, targetY, 0), 0.1);
+
+        // 4. Template Switching
+        const fingers = [8, 12, 16, 20].filter(i => lm[i].y < lm[i-2].y).length;
+        if (fingers === 1) morphTo('flower', 0x00ff88);
+        if (fingers === 2) morphTo('heart', 0xff0044);
+        if (fingers === 3) morphTo('saturn', 0x00ccff);
+
+        document.getElementById('gesture-out').innerText = `Fingers: ${fingers} | Rotation: ${rotation.toFixed(2)}`;
+    });
+
+    const cam = new Camera(document.getElementById('webcam'), {
+        onFrame: async () => { await hands.send({ image: document.getElementById('webcam') }); }
+    });
+    cam.start();
+
+    // --- ANIMATION ENGINE ---
+    function animate(time) {
+        requestAnimationFrame(animate);
+        TWEEN.update(time);
+
+        if (isExploding) {
+            const pos = geo.attributes.position.array;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                pos[i*3] += velArray[i*3];
+                pos[i*3+1] += velArray[i*3+1];
+                pos[i*3+2] += velArray[i*3+2];
+                // Friction
+                velArray[i*3] *= 0.95; velArray[i*3+1] *= 0.95; velArray[i*3+2] *= 0.95;
+            }
+            geo.attributes.position.needsUpdate = true;
+        }
+
+        points.rotation.y += 0.002;
+        renderer.render(scene, camera);
+    }
+    animate();
+
+</script>
+</body>
+</html>
